@@ -1,0 +1,268 @@
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local Players, RunService, Workspace, CoreGui, ReplicatedStorage, Lighting, Stats = game:GetService("Players"), game:GetService("RunService"), game:GetService("Workspace"), game:GetService("CoreGui"), game:GetService("ReplicatedStorage"), game:GetService("Lighting"), game:GetService("Stats")
+local LocalPlayer, Camera = Players.LocalPlayer, Workspace.CurrentCamera
+
+local Window = Rayfield:CreateWindow({Name = "Nine67 v.2", LoadingTitle = "Loading Nine67 v.2...", ConfigurationSaving = {Enabled = false}, KeySystem = false})
+local MainTab, CombatTab = Window:CreateTab("Main", 4483362458), Window:CreateTab("Combat", 4483362458)
+
+local isSpawning, isFlying, flySpeed, flyConn = false, false, 50, nil
+local isSpeed, walkSpeed, isJump, jumpPower = false, 16, false, 50
+local isAimbot, aimSmooth, isFOV, fovRadius = false, 0.2, false, 120
+local isESP, espTextSize = false, 10
+local isNoclip = false
+
+-- FOV GUI Fallback
+local fovGui = Instance.new("ScreenGui", gethui and gethui() or CoreGui)
+fovGui.Name = "FOVCircleGui"
+local fovFrame = Instance.new("Frame", fovGui)
+fovFrame.AnchorPoint, fovFrame.Position, fovFrame.BackgroundTransparency, fovFrame.Visible = Vector2.new(0.5, 0.5), UDim2.new(0.5, 0, 0.5, 0), 1, false
+Instance.new("UICorner", fovFrame).CornerRadius = UDim.new(1, 0)
+local uiStroke = Instance.new("UIStroke", fovFrame)
+uiStroke.Color, uiStroke.Thickness = Color3.fromRGB(255, 255, 255), 1.5
+
+-- FPS & Ping GUI
+local statsGui = Instance.new("ScreenGui", gethui and gethui() or CoreGui)
+statsGui.Name = "StatsGui"
+local statsLabel = Instance.new("TextLabel", statsGui)
+statsLabel.Size = UDim2.new(0, 200, 0, 30)
+statsLabel.Position = UDim2.new(0, 10, 0, 10)
+statsLabel.BackgroundTransparency = 0.5
+statsLabel.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+statsLabel.TextColor3 = Color3.fromRGB(0, 255, 127)
+statsLabel.TextSize = 14
+statsLabel.Font = Enum.Font.SourceSansBold
+statsLabel.Text = "FPS: ... | Ping: ..."
+Instance.new("UICorner", statsLabel).CornerRadius = UDim.new(0, 6)
+
+-- Main Tab Toggles
+MainTab:CreateToggle({Name = "Spawn Galaxy Block", CurrentValue = false, Callback = function(v)
+    isSpawning = v
+    if v then task.spawn(function() while isSpawning do local r = ReplicatedStorage:FindFirstChild("SpawnGalaxyBlock", true) if r and r:IsA("RemoteEvent") then r:FireServer() end task.wait(1) end end) end
+end})
+
+local function toggleFly(v)
+    isFlying = v
+    if flyConn then flyConn:Disconnect() flyConn = nil end
+    local char = LocalPlayer.Character
+    if not v and char then
+        local hrp = char:FindFirstChild("HumanoidRootPart")
+        if hrp then hrp.Anchored = false end
+        return
+    end
+    flyConn = RunService.RenderStepped:Connect(function(dt)
+        local c = LocalPlayer.Character
+        if isFlying and c and c:FindFirstChild("HumanoidRootPart") and c:FindFirstChildOfClass("Humanoid") then
+            local hrp, hum = c.HumanoidRootPart, c:FindFirstChildOfClass("Humanoid")
+            hrp.Anchored = true
+            local move = hum.MoveDirection
+            if move.Magnitude > 0 then
+                hrp.CFrame = CFrame.new(hrp.Position, hrp.Position + Camera.CFrame.LookVector) + (Camera.CFrame:VectorToWorldSpace(Vector3.new(move.X, 0, move.Z)) * flySpeed * dt)
+            else
+                hrp.CFrame = CFrame.new(hrp.Position, hrp.Position + Camera.CFrame.LookVector)
+            end
+        end
+    end)
+end
+
+MainTab:CreateToggle({Name = "Fly", CurrentValue = false, Callback = toggleFly})
+MainTab:CreateSlider({Name = "Fly Speed", Range = {10, 300}, Increment = 5, CurrentValue = 50, Callback = function(v) flySpeed = v end})
+MainTab:CreateToggle({Name = "WalkSpeed", CurrentValue = false, Callback = function(v) isSpeed = v if not v and LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then LocalPlayer.Character:FindFirstChildOfClass("Humanoid").WalkSpeed = 16 end end})
+MainTab:CreateSlider({Name = "Speed", Range = {16, 300}, Increment = 2, CurrentValue = 16, Callback = function(v) walkSpeed = v end})
+MainTab:CreateToggle({Name = "JumpPower", CurrentValue = false, Callback = function(v) isJump = v if not v and LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid") then LocalPlayer.Character:FindFirstChildOfClass("Humanoid").JumpPower = 50 end end})
+MainTab:CreateSlider({Name = "Jump", Range = {50, 500}, Increment = 10, CurrentValue = 50, Callback = function(v) jumpPower = v end})
+
+-- เดินทะลุกำแพง (Noclip)
+MainTab:CreateToggle({Name = "Noclip (ทะลุกำแพง)", CurrentValue = false, Callback = function(v)
+    isNoclip = v
+end})
+
+-- Teleport Player Section
+local targetPlayerName = ""
+local playerList = {}
+
+local function updatePlayerList()
+    playerList = {}
+    for _, p in pairs(Players:GetPlayers()) do
+        if p ~= LocalPlayer then
+            table.insert(playerList, p.Name)
+        end
+    end
+    return playerList
+end
+
+local tpDropdown = MainTab:CreateDropdown({
+    Name = "Select Player (เลือกผู้เล่น)",
+    Options = updatePlayerList(),
+    CurrentOption = "",
+    Callback = function(Option)
+        targetPlayerName = type(Option) == "table" and Option[1] or Option
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Refresh Player List (รีเฟรชรายชื่อ)",
+    Callback = function()
+        tpDropdown:Set(updatePlayerList())
+    end,
+})
+
+MainTab:CreateButton({
+    Name = "Teleport to Player (วาร์ปไปหา)",
+    Callback = function()
+        if targetPlayerName ~= "" then
+            local targetPlayer = Players:FindFirstChild(targetPlayerName)
+            if targetPlayer and targetPlayer.Character and targetPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+                    LocalPlayer.Character.HumanoidRootPart.CFrame = targetPlayer.Character.HumanoidRootPart.CFrame * CFrame.new(0, 0, 3)
+                end
+            end
+        end
+    end,
+})
+
+-- ปุ่ม Boost FPS 60+
+MainTab:CreateButton({
+    Name = "⚡ Boost FPS 60+",
+    Callback = function()
+        if setfpscap then setfpscap(60) end
+        
+        Lighting.GlobalShadows = false
+        Lighting.FogEnd = 9e9
+        Lighting.Brightness = 1
+        
+        for _, v in pairs(Lighting:GetChildren()) do
+            if v:IsA("PostEffect") or v:IsA("BloomEffect") or v:IsA("BlurEffect") or v:IsA("DepthOfFieldEffect") or v:IsA("SunRaysEffect") then
+                v.Enabled = false
+            end
+        end
+        
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        
+        for _, v in pairs(Workspace:GetDescendants()) do
+            if v:IsA("BasePart") then
+                v.Material = Enum.Material.SmoothPlastic
+                v.Reflectance = 0
+            elseif v:IsA("Decal") or v:IsA("Texture") then
+                v.Texture = ""
+            elseif v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Smoke") or v:IsA("Fire") or v:IsA("Sparkles") then
+                v.Enabled = false
+            end
+        end
+    end,
+})
+
+-- Graphic Quality / Potato Mode Toggle
+MainTab:CreateButton({
+    Name = "Low Graphics / Potato Mode",
+    Callback = function()
+        Lighting.GlobalShadows = false
+        Lighting.FogEnd = 9e9
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        for _, v in pairs(Workspace:GetDescendants()) do
+            if v:IsA("BasePart") and not v:IsA("MeshPart") then
+                v.Material = Enum.Material.SmoothPlastic
+            elseif v:IsA("Texture") or v:IsA("Decal") then
+                v:Destroy()
+            end
+        end
+    end,
+})
+
+-- Combat Tab (Aimbot & ESP)
+CombatTab:CreateToggle({Name = "Aimbot (Smooth)", CurrentValue = false, Callback = function(v) isAimbot = v end})
+CombatTab:CreateSlider({Name = "Aimbot Smoothness", Range = {0.05, 1}, Increment = 0.05, CurrentValue = 0.2, Callback = function(v) aimSmooth = v end})
+CombatTab:CreateToggle({Name = "Show FOV", CurrentValue = false, Callback = function(v) isFOV = v end})
+CombatTab:CreateSlider({Name = "FOV Radius", Range = {50, 400}, Increment = 5, CurrentValue = 120, Callback = function(v) fovRadius = v end})
+
+local function applyESP(p)
+    if p == LocalPlayer or not p.Character then return end
+    if not p.Character:FindFirstChild("ESPHighlight") then
+        local hl = Instance.new("Highlight", p.Character)
+        hl.Name, hl.FillColor, hl.DepthMode = "ESPHighlight", Color3.fromRGB(255, 50, 50), Enum.HighlightDepthMode.AlwaysOnTop
+    end
+    local head = p.Character:WaitForChild("Head", 5)
+    if head and not head:FindFirstChild("ESPName") then
+        local bg = Instance.new("BillboardGui", head)
+        bg.Name, bg.Adornee, bg.Size, bg.StudsOffset, bg.AlwaysOnTop = "ESPName", head, UDim2.new(0, 80, 0, 20), Vector3.new(0, 2, 0), true
+        local txt = Instance.new("TextLabel", bg)
+        txt.Name, txt.Size, txt.BackgroundTransparency, txt.Text, txt.TextColor3, txt.TextSize = "NameLabel", UDim2.new(1, 0, 1, 0), 1, p.Name, Color3.fromRGB(255, 255, 255), espTextSize
+    end
+end
+
+CombatTab:CreateToggle({Name = "ESP", CurrentValue = false, Callback = function(v)
+    isESP = v
+    if v then
+        for _, p in pairs(Players:GetPlayers()) do applyESP(p) end
+    else
+        for _, p in pairs(Players:GetPlayers()) do
+            if p.Character then
+                if p.Character:FindFirstChild("ESPHighlight") then p.Character.ESPHighlight:Destroy() end
+                if p.Character:FindFirstChild("Head") and p.Character.Head:FindFirstChild("ESPName") then p.Character.Head.ESPName:Destroy() end
+            end
+        end
+    end
+end})
+
+CombatTab:CreateSlider({Name = "ESP Name Size", Range = {6, 24}, Increment = 1, CurrentValue = 10, Callback = function(v)
+    espTextSize = v
+    for _, p in pairs(Players:GetPlayers()) do
+        if p.Character and p.Character:FindFirstChild("Head") and p.Character.Head:FindFirstChild("ESPName") then
+            p.Character.Head.ESPName.NameLabel.TextSize = v
+        end
+    end
+end})
+
+Players.PlayerAdded:Connect(function(p) p.CharacterAdded:Connect(function() if isESP then task.wait(0.5); applyESP(p) end end) end)
+
+-- Core Loops
+RunService.Stepped:Connect(function()
+    local char = LocalPlayer.Character
+    if char then
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            if isSpeed then hum.WalkSpeed = walkSpeed end
+            if isJump then hum.UseJumpPower = true hum.JumpPower = jumpPower end
+        end
+        if isNoclip then
+            for _, part in pairs(char:GetDescendants()) do
+                if part:IsA("BasePart") and part.CanCollide then
+                    part.CanCollide = false
+                end
+            end
+        end
+    end
+end)
+
+-- คำนวณ FPS & Ping ตัวอัปเดต
+local lastFpsUpdate = tick()
+local frameCount = 0
+
+RunService.RenderStepped:Connect(function(dt)
+    frameCount = frameCount + 1
+    if tick() - lastFpsUpdate >= 1 then
+        local fps = math.floor(frameCount / (tick() - lastFpsUpdate))
+        local ping = math.floor(Stats.Network.ServerStatsItem["Data Ping"]:GetValue())
+        statsLabel.Text = string.format("FPS: %d | Ping: %d ms", fps, ping)
+        frameCount = 0
+        lastFpsUpdate = tick()
+    end
+
+    fovFrame.Size, fovFrame.Visible = UDim2.new(0, fovRadius * 2, 0, fovRadius * 2), isFOV
+    if isAimbot then
+        local closest, shortest = nil, fovRadius
+        local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+        for _, p in pairs(Players:GetPlayers()) do
+            if p ~= LocalPlayer and p.Character and p.Character:FindFirstChild("Head") then
+                local hum = p.Character:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    local pos, onScreen = Camera:WorldToViewportPoint(p.Character.Head.Position)
+                    if onScreen then
+                        local dist = (Vector2.new(pos.X, pos.Y) - center).Magnitude
+                        if dist < shortest then shortest = dist closest = p end
+                    end
+                end
+            end
+        end
+        if closest then Camera.CFrame = Camera.CFrame:Lerp(CFrame.new(Camera.CFrame.Position, closest.Character.Head.Position), aimSmooth) end
+    end
+end)
