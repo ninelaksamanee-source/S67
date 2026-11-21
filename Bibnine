@@ -1,0 +1,673 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local Lighting = game:GetService("Lighting")
+
+local player = Players.LocalPlayer
+local camera = workspace.CurrentCamera
+
+local ACCENT = Color3.fromRGB(90, 130, 255)
+local BG = Color3.fromRGB(22, 22, 30)
+local PANEL = Color3.fromRGB(30, 30, 42)
+local ITEM = Color3.fromRGB(40, 40, 56)
+local WHITE = Color3.new(1, 1, 1)
+local GRAY = Color3.fromRGB(150, 150, 170)
+local OFF = Color3.fromRGB(70, 70, 90)
+
+-- สถานะ
+local flying, speedOn = false, false
+local flySpeed, walkSpeed, defaultWalk = 60, 50, 16
+local bv, bg
+local espOn, espNames, espTeam = false, true, false
+local aimOn, aimAlways, aimTeam, aimWall = false, false, true, true
+local aimSmooth, aimFov = 40, 150
+local aimPartName = "Head"
+
+local function new(class, props, parent, radius)
+	local o = Instance.new(class)
+	for k, v in pairs(props) do
+		o[k] = v
+	end
+	o.Parent = parent
+	if radius then
+		local c = Instance.new("UICorner")
+		c.CornerRadius = UDim.new(0, radius)
+		c.Parent = o
+	end
+	return o
+end
+
+local function getChar()
+	local c = player.Character
+	if c then
+		return c:FindFirstChildOfClass("Humanoid"), c:FindFirstChild("HumanoidRootPart")
+	end
+end
+
+local function isPress(i)
+	return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch
+end
+
+local function isMove(i)
+	return i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch
+end
+
+-- ===== บิน / วิ่งเร็ว =====
+local function applyWalk()
+	local hum = getChar()
+	if hum then
+		hum.WalkSpeed = speedOn and walkSpeed or defaultWalk
+	end
+end
+
+local function stopFly()
+	flying = false
+	if bv then bv:Destroy() bv = nil end
+	if bg then bg:Destroy() bg = nil end
+	local hum = getChar()
+	if hum then
+		hum.PlatformStand = false
+	end
+end
+
+local function startFly()
+	local hum, root = getChar()
+	if not (hum and root) then return end
+	flying = true
+	hum.PlatformStand = true
+	bv = new("BodyVelocity", {MaxForce = Vector3.new(1e5, 1e5, 1e5), Velocity = Vector3.new()}, root)
+	bg = new("BodyGyro", {MaxTorque = Vector3.new(1e5, 1e5, 1e5), P = 1e4, CFrame = root.CFrame}, root)
+end
+
+-- ===== มองทะลุ =====
+local espObjs = {}
+
+local function clearEsp(plr)
+	if espObjs[plr] then
+		for _, o in ipairs(espObjs[plr]) do
+			o:Destroy()
+		end
+		espObjs[plr] = nil
+	end
+end
+
+local function updateEsp(plr)
+	clearEsp(plr)
+	if not espOn or plr == player then return end
+	if espTeam and plr.Team and plr.Team == player.Team then return end
+	local char = plr.Character
+	local head = char and char:FindFirstChild("Head")
+	if not head then return end
+	local list = {}
+	list[1] = new("Highlight", {
+		FillColor = Color3.fromRGB(255, 70, 70),
+		FillTransparency = 0.6,
+		OutlineColor = WHITE,
+		DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+	}, char)
+	if espNames then
+		local bb = new("BillboardGui", {
+			Size = UDim2.new(0, 120, 0, 20),
+			StudioOffset = Vector3.new(0, 2.5, 0),
+			AlwaysOnTop = true,
+			Adornee = head,
+		}, char)
+		new("TextLabel", {
+			Size = UDim2.new(1, 0, 1, 0),
+			BackgroundTransparency = 1,
+			Text = plr.DisplayName,
+			TextColor3 = WHITE,
+			TextStrokeTransparency = 0.4,
+			Font = Enum.Font.GothamBold,
+			TextSize = 13,
+		}, bb)
+		list[2] = bb
+	end
+	espObjs[plr] = list
+end
+
+local function refreshEsp()
+	for _, p in ipairs(Players:GetPlayers()) do
+		updateEsp(p)
+	end
+end
+
+local function hookPlayer(p)
+	p.CharacterAdded:Connect(function()
+		task.wait(0.5)
+		updateEsp(p)
+	end)
+end
+
+for _, p in ipairs(Players:GetPlayers()) do
+	hookPlayer(p)
+end
+Players.PlayerAdded:Connect(hookPlayer)
+Players.PlayerRemoving:Connect(clearEsp)
+
+-- ===== ล็อกเป้า =====
+local function isBlocked(part, char)
+	if not aimWall then return false end
+	local params = RaycastParams.new()
+	params.FilterDescendantsInstances = {player.Character}
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local origin = camera.CFrame.Position
+	local hit = workspace:Raycast(origin, part.Position - origin, params)
+	return hit ~= nil and not hit.Instance:IsDescendantOf(char)
+end
+
+local function findTarget()
+	local center = camera.ViewportSize / 2
+	local best, bestDist
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= player and p.Character then
+			if not (aimTeam and p.Team and p.Team == player.Team) then
+				local hum = p.Character:FindFirstChildOfClass("Humanoid")
+				local part = p.Character:FindFirstChild(aimPartName) or p.Character:FindFirstChild("HumanoidRootPart")
+				if hum and hum.Health > 0 and part then
+					local pos, onScreen = camera:WorldToViewportPoint(part.Position)
+					if onScreen then
+						local d = (Vector2.new(pos.X, pos.Y) - center).Magnitude
+						if d <= aimFov and (not bestDist or d < bestDist) and not isBlocked(part, p.Character) then
+							best, bestDist = part, d
+						end
+					end
+				end
+			end
+		end
+	end
+	return best
+end
+
+-- ===== หน้าต่างหลัก =====
+local gui = new("ScreenGui", {Name = "bibten_v1", ResetOnSpawn = false, IgnoreGuiInset = true}, player:WaitForChild("PlayerGui"))
+
+local fovCircle = new("Frame", {
+	AnchorPoint = Vector2.new(0.5, 0.5),
+	Position = UDim2.new(0.5, 0, 0.5, 0),
+	Size = UDim2.new(0, aimFov * 2, 0, aimFov * 2),
+	BackgroundTransparency = 1,
+	Visible = false,
+}, gui, 1000)
+new("UIStroke", {Color = ACCENT, Thickness = 1.5}, fovCircle)
+fovCircle.UICorner.CornerRadius = UDim.new(1, 0)
+
+local main = new("Frame", {
+	Size = UDim2.new(0, 420, 0, 280),
+	Position = UDim2.new(0.5, -210, 0.5, -140),
+	BackgroundColor3 = BG,
+	ClipsDescendants = true,
+}, gui, 12)
+new("UIStroke", {Color = ACCENT, Thickness = 1.2, Transparency = 0.5}, main)
+
+local top = new("Frame", {Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = PANEL}, main, 12)
+new("Frame", {
+	Size = UDim2.new(1, 0, 0, 12),
+	Position = UDim2.new(0, 0, 1, -12),
+	BackgroundColor3 = PANEL,
+	BorderSizePixel = 0,
+}, top)
+new("TextLabel", {
+	Size = UDim2.new(1, -60, 1, 0),
+	Position = UDim2.new(0, 14, 0, 0),
+	BackgroundTransparency = 1,
+	Text = "bibten v.1",
+	TextColor3 = WHITE,
+	Font = Enum.Font.GothamBold,
+	TextSize = 16,
+	TextXAlignment = Enum.TextXAlignment.Left,
+}, top)
+local closeBtn = new("TextButton", {
+	Size = UDim2.new(0, 26, 0, 26),
+	Position = UDim2.new(1, -34, 0, 6),
+	BackgroundColor3 = Color3.fromRGB(200, 60, 60),
+	Text = "X",
+	TextColor3 = WHITE,
+	Font = Enum.Font.GothamBold,
+	TextSize = 13,
+}, top, 7)
+
+-- ลากหน้าต่าง
+do
+	local drag, ds, sp = false, nil, nil
+	top.InputBegan:Connect(function(i)
+		if isPress(i) then
+			drag, ds, sp = true, i.Position, main.Position
+		end
+	end)
+	UIS.InputChanged:Connect(function(i)
+		if drag and isMove(i) then
+			local d = i.Position - ds
+			main.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
+		end
+	end)
+	UIS.InputEnded:Connect(function(i)
+		if isPress(i) then drag = false end
+	end)
+end
+
+local side = new("ScrollingFrame", {
+	Size = UDim2.new(0, 110, 1, -48),
+	Position = UDim2.new(0, 8, 0, 44),
+	BackgroundTransparency = 1,
+	BorderSizePixel = 0,
+	ScrollBarThickness = 0,
+	AutomaticCanvasSize = Enum.AutomaticSize.Y,
+	CanvasSize = UDim2.new(0, 0, 0, 0),
+}, main)
+new("UIListLayout", {Padding = UDim.new(0, 6)}, side)
+
+local content = new("Frame", {
+	Size = UDim2.new(1, -134, 1, -48),
+	Position = UDim2.new(0, 126, 0, 44),
+	BackgroundTransparency = 1,
+}, main)
+
+local tabs = {}
+
+local function selectTab(name)
+	for n, t in pairs(tabs) do
+		local on = (n == name)
+		t.page.Visible = on
+		t.btn.BackgroundColor3 = on and ACCENT or ITEM
+		t.btn.TextColor3 = on and WHITE or GRAY
+	end
+end
+
+local function addTab(name)
+	local btn = new("TextButton", {
+		Size = UDim2.new(1, 0, 0, 34),
+		BackgroundColor3 = ITEM,
+		Text = name,
+		TextColor3 = GRAY,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 13,
+	}, side, 8)
+	local page = new("ScrollingFrame", {
+		Size = UDim2.new(1, 0, 1, 0),
+		BackgroundTransparency = 1,
+		BorderSizePixel = 0,
+		ScrollBarThickness = 3,
+		ScrollBarImageColor3 = ACCENT,
+		Visible = false,
+		AutomaticCanvasSize = Enum.AutomaticSize.Y,
+		CanvasSize = UDim2.new(0, 0, 0, 0),
+	}, content)
+	new("UIListLayout", {Padding = UDim.new(0, 6)}, page)
+	tabs[name] = {btn = btn, page = page}
+	btn.MouseButton1Click:Connect(function()
+		selectTab(name)
+	end)
+	return page
+end
+
+-- ===== คอมโพเนนต์ UI =====
+local function addToggle(page, text, default, callback)
+	local row = new("Frame", {Size = UDim2.new(1, -6, 0, 40), BackgroundColor3 = ITEM}, page, 8)
+	new("TextLabel", {
+		Size = UDim2.new(1, -70, 1, 0),
+		Position = UDim2.new(0, 12, 0, 0),
+		BackgroundTransparency = 1,
+		Text = text,
+		TextColor3 = WHITE,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextWrapped = true,
+	}, row)
+	local pill = new("Frame", {
+		Size = UDim2.new(0, 40, 0, 20),
+		Position = UDim2.new(1, -52, 0.5, -10),
+		BackgroundColor3 = OFF,
+	}, row, 10)
+	local knob = new("Frame", {
+		Size = UDim2.new(0, 16, 0, 16),
+		Position = UDim2.new(0, 2, 0.5, -8),
+		BackgroundColor3 = WHITE,
+	}, pill, 8)
+	local click = new("TextButton", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = ""}, row)
+
+	local state = default
+	local function render()
+		local info = TweenInfo.new(0.15)
+		TweenService:Create(knob, info, {
+			Position = state and UDim2.new(1, -18, 0.5, -8) or UDim2.new(0, 2, 0.5, -8),
+		}):Play()
+		TweenService:Create(pill, info, {BackgroundColor3 = state and ACCENT or OFF}):Play()
+	end
+	render()
+	click.MouseButton1Click:Connect(function()
+		state = not state
+		render()
+		callback(state)
+	end)
+	return function(v)
+		state = v
+		render()
+	end
+end
+
+local function addSlider(page, text, min, max, default, callback)
+	local row = new("Frame", {Size = UDim2.new(1, -6, 0, 54), BackgroundColor3 = ITEM}, page, 8)
+	new("TextLabel", {
+		Size = UDim2.new(1, -70, 0, 24),
+		Position = UDim2.new(0, 12, 0, 4),
+		BackgroundTransparency = 1,
+		Text = text,
+		TextColor3 = WHITE,
+		Font = Enum.Font.Gotham,
+		TextSize = 12,
+		TextXAlignment = Enum.TextXAlignment.Left,
+	}, row)
+	local val = new("TextLabel", {
+		Size = UDim2.new(0, 50, 0, 24),
+		Position = UDim2.new(1, -62, 0, 4),
+		BackgroundTransparency = 1,
+		Text = tostring(default),
+		TextColor3 = ACCENT,
+		Font = Enum.Font.GothamBold,
+		TextSize = 13,
+		TextXAlignment = Enum.TextXAlignment.Right,
+	}, row)
+	local bar = new("Frame", {
+		Size = UDim2.new(1, -24, 0, 6),
+		Position = UDim2.new(0, 12, 0, 36),
+		BackgroundColor3 = OFF,
+	}, row, 3)
+	local fill = new("Frame", {
+		Size = UDim2.new((default - min) / (max - min), 0, 1, 0),
+		BackgroundColor3 = ACCENT,
+	}, bar, 3)
+
+	local sliding = false
+	local function update(x)
+		local a = math.clamp((x - bar.AbsolutePosition.X) / bar.AbsoluteSize.X, 0, 1)
+		local v = math.floor(min + a * (max - min) + 0.5)
+		fill.Size = UDim2.new(a, 0, 1, 0)
+		val.Text = tostring(v)
+		callback(v)
+	end
+	bar.InputBegan:Connect(function(i)
+		if isPress(i) then
+			sliding = true
+			update(i.Position.X)
+		end
+	end)
+	UIS.InputChanged:Connect(function(i)
+		if sliding and isMove(i) then
+			update(i.Position.X)
+		end
+	end)
+	UIS.InputEnded:Connect(function(i)
+		if isPress(i) then sliding = false end
+	end)
+end
+
+local function addButton(page, text, callback)
+	local b = new("TextButton", {
+		Size = UDim2.new(1, -6, 0, 38),
+		BackgroundColor3 = ACCENT,
+		Text = text,
+		TextColor3 = WHITE,
+		Font = Enum.Font.GothamMedium,
+		TextSize = 13,
+	}, page, 8)
+	b.MouseButton1Click:Connect(function()
+		callback(b)
+	end)
+	return b
+end
+
+-- ===== แท็บ: เคลื่อนไหว =====
+local pg1 = addTab("เคลื่อนไหว")
+local setFly = addToggle(pg1, "บิน", false, function(on)
+	if on then startFly() else stopFly() end
+end)
+addSlider(pg1, "ความเร็วบิน", 10, 300, flySpeed, function(v)
+	flySpeed = v
+end)
+local setSpeed = addToggle(pg1, "วิ่งเร็ว", false, function(on)
+	speedOn = on
+	applyWalk()
+end)
+addSlider(pg1, "ความเร็ววิ่ง", 16, 300, walkSpeed, function(v)
+	walkSpeed = v
+	applyWalk()
+end)
+
+-- ===== แท็บ: มองทะลุ =====
+local pg2 = addTab("มองทะลุ")
+local setEsp = addToggle(pg2, "เปิดมองทะลุ", false, function(on)
+	espOn = on
+	refreshEsp()
+end)
+addToggle(pg2, "แสดงชื่อผู้เล่น", true, function(on)
+	espNames = on
+	refreshEsp()
+end)
+addToggle(pg2, "ซ่อนเพื่อนร่วมทีม", false, function(on)
+	espTeam = on
+	refreshEsp()
+end)
+
+-- ===== แท็บ: ล็อกเป้า =====
+local pg3 = addTab("ล็อกเป้า")
+local setAim = addToggle(pg3, "เปิดล็อกเป้า", false, function(on)
+	aimOn = on
+	fovCircle.Visible = on
+end)
+addToggle(pg3, "ล็อกตลอด (มือถือ)", false, function(on)
+	aimAlways = on
+end)
+addSlider(pg3, "ความนุ่มนวล", 1, 100, aimSmooth, function(v)
+	aimSmooth = v
+end)
+addSlider(pg3, "ขนาดวงล็อก", 30, 500, aimFov, function(v)
+	aimFov = v
+	fovCircle.Size = UDim2.new(0, v * 2, 0, v * 2)
+end)
+addButton(pg3, "เป้าหมาย: หัว", function(b)
+	if aimPartName == "Head" then
+		aimPartName = "HumanoidRootPart"
+		b.Text = "เป้าหมาย: ลำตัว"
+	else
+		aimPartName = "Head"
+		b.Text = "เป้าหมาย: หัว"
+	end
+end)
+addToggle(pg3, "ไม่ล็อกเพื่อนร่วมทีม", true, function(on)
+	aimTeam = on
+end)
+addToggle(pg3, "ไม่ล็อกคนหลังกำแพง", true, function(on)
+	aimWall = on
+end)
+
+-- ===== แท็บ: ภาพ (ดินน้ำมัน) =====
+local pg5 = addTab("ภาพ")
+
+local clayOn = false
+local origMaterials = setmetatable({}, {__mode = "k"})
+local origLighting = {
+	Brightness = Lighting.Brightness,
+	Ambient = Lighting.Ambient,
+	OutdoorAmbient = Lighting.OutdoorAmbient,
+	EnvironmentSpecularScale = Lighting.EnvironmentSpecularScale,
+}
+
+local function getFx(class, name)
+	local o = Lighting:FindFirstChild(name)
+	if not o then
+		o = Instance.new(class)
+		o.Name = name
+		o.Parent = Lighting
+	end
+	return o
+end
+
+local cc = getFx("ColorCorrectionEffect", "ClayColor")
+local blur = getFx("BlurEffect", "ClayBlur")
+local bloom = getFx("BloomEffect", "ClayBloom")
+cc.Enabled, blur.Enabled, bloom.Enabled = false, false, false
+cc.Saturation, cc.Contrast, cc.Brightness = 0.25, 0.05, 0.03
+cc.TintColor = Color3.fromRGB(255, 245, 235)
+blur.Size = 2
+bloom.Intensity, bloom.Size, bloom.Threshold = 0.3, 20, 1.8
+
+local function smooth(part)
+	if part:IsA("BasePart") and not part:IsA("Terrain") then
+		if not origMaterials[part] then
+			origMaterials[part] = part.Material
+		end
+		part.Material = Enum.Material.SmoothPlastic
+	end
+end
+
+local smoothConn
+local function setClay(on)
+	clayOn = on
+	cc.Enabled, blur.Enabled, bloom.Enabled = on, on, on
+	if on then
+		Lighting.Brightness = 2.5
+		Lighting.Ambient = Color3.fromRGB(150, 140, 135)
+		Lighting.OutdoorAmbient = Color3.fromRGB(170, 160, 150)
+		Lighting.EnvironmentSpecularScale = 0
+		for _, v in ipairs(workspace:GetDescendants()) do
+			smooth(v)
+		end
+		if smoothConn then smoothConn:Disconnect() end
+		smoothConn = workspace.DescendantAdded:Connect(smooth)
+	else
+		if smoothConn then smoothConn:Disconnect() smoothConn = nil end
+		for k, v in pairs(origLighting) do
+			Lighting[k] = v
+		end
+		for part, mat in pairs(origMaterials) do
+			if part.Parent then part.Material = mat end
+		end
+		origMaterials = setmetatable({}, {__mode = "k"})
+	end
+end
+
+local setClayToggle = addToggle(pg5, "เปิดภาพดินน้ำมัน", false, setClay)
+addSlider(pg5, "ความสดของสี", 0, 100, 25, function(v)
+	cc.Saturation = v / 100
+end)
+addSlider(pg5, "ความนุ่ม (เบลอ)", 0, 10, 2, function(v)
+	blur.Size = v
+end)
+addSlider(pg5, "ความสว่าง", 10, 50, 25, function(v)
+	if clayOn then Lighting.Brightness = v / 10 end
+end)
+
+-- ===== แท็บ: ตั้งค่า =====
+local pg4 = addTab("ตั้งค่า")
+addSlider(pg4, "ความโปร่งใส UI", 0, 70, 0, function(v)
+	main.BackgroundTransparency = v / 100
+end)
+addButton(pg4, "รีเซ็ตทุกอย่าง", function()
+	stopFly()
+	setFly(false)
+	speedOn = false
+	setSpeed(false)
+	applyWalk()
+	espOn = false
+	setEsp(false)
+	refreshEsp()
+	aimOn = false
+	setAim(false)
+	fovCircle.Visible = false
+	setClay(false)
+	setClayToggle(false)
+end)
+new("TextLabel", {
+	Size = UDim2.new(1, -6, 0, 40),
+	BackgroundTransparency = 1,
+	TextWrapped = true,
+	Text = "Right Shift หรือปุ่ม ☰ = เปิด/ปิดหน้าต่าง",
+	TextColor3 = GRAY,
+	Font = Enum.Font.Gotham,
+	TextSize = 12,
+}, pg4)
+
+selectTab("เคลื่อนไหว")
+
+-- ===== ลูปหลัก =====
+RunService.RenderStepped:Connect(function()
+	if flying and bv and bg then
+		local hum = getChar()
+		if hum then
+			local cf = camera.CFrame
+			local move = cf:VectorToObjectSpace(hum.MoveDirection)
+			bv.Velocity = (cf.LookVector * -move.Z + cf.RightVector * move.X) * flySpeed
+			bg.CFrame = cf
+		end
+	end
+
+	if aimOn and (aimAlways or UIS:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)) then
+		local target = findTarget()
+		if target then
+			local alpha = math.clamp((101 - aimSmooth) / 100, 0.02, 1)
+			local goal = CFrame.new(camera.CFrame.Position, target.Position)
+			camera.CFrame = camera.CFrame:Lerp(goal, alpha)
+		end
+	end
+end)
+
+-- ===== เปิด/ปิด UI + ปุ่ม ☰ =====
+local function toggleWindow()
+	main.Visible = not main.Visible
+end
+
+closeBtn.MouseButton1Click:Connect(function()
+	main.Visible = false
+end)
+
+UIS.InputBegan:Connect(function(i, gp)
+	if not gp and i.KeyCode == Enum.KeyCode.RightShift then
+		toggleWindow()
+	end
+end)
+
+local toggleBtn = new("TextButton", {
+	Size = UDim2.new(0, 44, 0, 44),
+	Position = UDim2.new(0, 10, 0.5, -22),
+	BackgroundColor3 = BG,
+	Text = "☰",
+	TextColor3 = WHITE,
+	Font = Enum.Font.GothamBold,
+	TextSize = 22,
+}, gui, 22)
+new("UIStroke", {Color = ACCENT, Thickness = 1.5}, toggleBtn)
+
+do
+	local dragging, moved, ds, sp = false, false, nil, nil
+	toggleBtn.InputBegan:Connect(function(i)
+		if isPress(i) then
+			dragging, moved, ds, sp = true, false, i.Position, toggleBtn.Position
+		end
+	end)
+	UIS.InputChanged:Connect(function(i)
+		if dragging and isMove(i) then
+			local d = i.Position - ds
+			if d.Magnitude > 6 then moved = true end
+			toggleBtn.Position = UDim2.new(sp.X.Scale, sp.X.Offset + d.X, sp.Y.Scale, sp.Y.Offset + d.Y)
+		end
+	end)
+	UIS.InputEnded:Connect(function(i)
+		if isPress(i) then
+			if dragging and not moved then
+				toggleWindow()
+			end
+			dragging = false
+		end
+	end)
+end
+
+-- รีเซ็ตเมื่อเกิดใหม่
+player.CharacterAdded:Connect(function()
+	stopFly()
+	setFly(false)
+	task.wait(0.5)
+	applyWalk()
+end)
